@@ -82,9 +82,9 @@ export async function processPDFAction(formData: FormData) {
 
     // 5. Store embeddings in vector DB
     for (const chunk of chunks) {
-      // Use @ai-sdk/google embed — text-embedding-004 → 768 dims, matches VECTOR(768) schema
+      // Use @ai-sdk/google embed — gemini-embedding-001 → 3072 dims, matches VECTOR(3072) schema
       const { embedding } = await embed({
-        model: google.textEmbeddingModel("text-embedding-004"),
+        model: google.textEmbeddingModel("gemini-embedding-001"),
         value: chunk.pageContent,
       });
 

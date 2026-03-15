@@ -127,3 +127,35 @@
     @apply font-sans;
   }
 }
+
+/* ── Mobile responsiveness globals ────────────────────────── */
+
+/* Prevent horizontal scroll from AI-generated code blocks */
+.prose pre {
+  overflow-x: auto;
+  max-width: 100%;
+  white-space: pre;
+}
+.prose code {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Smooth momentum scrolling on iOS */
+.overscroll-contain {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* Disable heavy animations on low-power devices / reduced-motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Use dynamic viewport height to account for browser chrome on mobile */
+.h-dvh  { height: 100dvh; }
+.min-h-dvh { min-height: 100dvh; }

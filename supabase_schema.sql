@@ -16,7 +16,7 @@ CREATE TABLE embeddings (
   document_id UUID REFERENCES documents(id) ON DELETE CASCADE NOT NULL,
   content TEXT NOT NULL,
   metadata JSONB DEFAULT '{}'::jsonb, -- e.g., {"loc": {"pageNumber": 1}}
-  embedding VECTOR(768) NOT NULL, -- 768 is the format for Gemini models like text-embedding-004
+  embedding VECTOR(3072) NOT NULL, -- 3072 is the format for Gemini models like gemini-embedding-001
   created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
@@ -25,7 +25,7 @@ CREATE INDEX on embeddings USING hnsw (embedding vector_cosine_ops);
 
 -- Optional: Create a function for similarity search
 CREATE OR REPLACE FUNCTION match_embeddings(
-  query_embedding VECTOR(768),
+  query_embedding VECTOR(3072),
   match_count INT DEFAULT 5
 )
 RETURNS TABLE (
