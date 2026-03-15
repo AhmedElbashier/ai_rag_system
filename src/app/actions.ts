@@ -1,11 +1,11 @@
 "use server";
 
 import { supabaseAdmin } from "@/lib/supabase";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import { WebPDFLoader } from "@langchain/community/document_loaders/web/pdf";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 export async function processPDFAction(formData: FormData) {
   try {
@@ -18,10 +18,17 @@ export async function processPDFAction(formData: FormData) {
       throw new Error("Only PDF files are supported");
     }
 
-    // 1. Upload file to Supabase Storage
+    // 1. Ensure storage bucket exists, then upload file
+    const { data: buckets } = await supabaseAdmin.storage.listBuckets();
+    const bucketExists = buckets?.some((b) => b.name === "documents");
+    if (!bucketExists) {
+      const { error: bucketError } = await supabaseAdmin.storage.createBucket("documents", { public: true });
+      if (bucketError) throw new Error(`Failed to create storage bucket: ${bucketError.message}`);
+    }
+
     const uniqueFileName = `${Date.now()}-${file.name}`;
     const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
-      .from("documents") // MUST create this bucket in Supabase Dashboard
+      .from("documents")
       .upload(uniqueFileName, file, { cacheControl: "3600", upsert: false });
 
     if (uploadError) {
@@ -71,14 +78,14 @@ export async function processPDFAction(formData: FormData) {
     // Split the docs (which already contain metadata.loc.pageNumber natively)
     const chunks = await splitter.splitDocuments(rawDocs);
 
-    // Initialize Gemini model
-    const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
-
     // 5. Store embeddings in vector DB
     for (const chunk of chunks) {
-      // Get embedding from Gemini
-      const result = await model.embedContent(chunk.pageContent);
-      const embedding = result.embedding.values; 
+      // Get embedding from Gemini (using @google/genai which targets v1 API)
+      const result = await genAI.models.embedContent({
+        model: "gemini-embedding-001",
+        contents: chunk.pageContent,
+      });
+      const embedding = result.embeddings?.[0]?.values;
 
       // Store in pgvector natively, ensuring we include page metadata (loc.pageNumber)
       const { error: embedError } = await supabaseAdmin
@@ -107,4 +114,46 @@ export async function processPDFAction(formData: FormData) {
       message: error.message || "An unexpected error occurred during processing.",
     };
   }
+}
+
+export async function fetchDocumentsAction() {
+  const { data, error } = await supabaseAdmin
+    .from("documents")
+    .select("id, file_name, file_url, created_at, content")
+    .order("created_at", { ascending: false });
+  if (error) return { documents: [], error: error.message };
+  return {
+    documents: (data ?? []).map((d) => ({
+      id: d.id as string,
+      file_name: d.file_name as string,
+      file_url: d.file_url as string,
+      created_at: d.created_at as string,
+      word_count: (d.content as string).trim().split(/\s+/).length,
+    })),
+    error: null,
+  };
+}
+
+export async function deleteDocumentAction(id: string) {
+  // Delete embeddings (cascade should handle it, but be explicit)
+  await supabaseAdmin.from("embeddings").delete().eq("document_id", id);
+
+  // Delete storage file
+  const { data: doc } = await supabaseAdmin
+    .from("documents")
+    .select("file_url")
+    .eq("id", id)
+    .single();
+
+  if (doc?.file_url) {
+    const url = new URL(doc.file_url);
+    const storagePath = url.pathname.split("/object/public/documents/")[1];
+    if (storagePath) {
+      await supabaseAdmin.storage.from("documents").remove([decodeURIComponent(storagePath)]);
+    }
+  }
+
+  const { error } = await supabaseAdmin.from("documents").delete().eq("id", id);
+  if (error) return { success: false, error: error.message };
+  return { success: true };
 }

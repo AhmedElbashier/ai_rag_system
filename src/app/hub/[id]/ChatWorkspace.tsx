@@ -1,9 +1,8 @@
 "use client";
 
-// @ts-expect-error ignores React19 compat node modules ts resolution problem
-import { useChat } from "ai/react";
-import { Send, Bot, User, FileText, ArrowLeft, Loader2 } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useChat } from "@ai-sdk/react";
+import { Send, Bot, User, FileText, ArrowLeft, Loader2, BookOpen } from "lucide-react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useRouter } from "next/navigation";
@@ -15,144 +14,242 @@ interface ChatWorkspaceProps {
   documentName: string;
 }
 
+/** Extract all "Page N" / "(Page N)" citations from an AI message */
+function extractPages(text: string | undefined): number[] {
+  if (!text) return [];
+  const matches = [...text.matchAll(/\bpage\s+(\d+)\b/gi)];
+  return [...new Set(matches.map((m) => parseInt(m[1], 10)))].filter(
+    (n) => !isNaN(n) && n > 0
+  );
+}
+
+const INITIAL_MESSAGE = {
+  id: "sys-1",
+  role: "assistant" as const,
+  content: "",  // filled per-document in the component
+  parts: [] as any[],
+};
+
 export default function ChatWorkspace({ documentId, documentUrl, documentName }: ChatWorkspaceProps) {
   const router = useRouter();
-  const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
+  const [input, setInput] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const { messages, sendMessage, status, setMessages } = useChat({
     api: "/api/chat",
     body: { documentId },
-    initialMessages: [
-      {
-        id: "sys-1",
-        role: "assistant",
-        content: `Hi there! I've successfully analyzed **${documentName}**. You can ask me any questions about it. I will provide answers with page citations from the document.`,
-      },
-    ],
   });
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Set the welcome message once on mount
+  useEffect(() => {
+    setMessages([{
+      id: "sys-1",
+      role: "assistant",
+      content: `Hi there! I've analyzed **${documentName}**. Ask me anything — I'll cite page numbers so you can verify.`,
+      parts: [],
+    }]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentId]);
+
+  // Auto-jump to the first page cited in the latest assistant message
+  useEffect(() => {
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+    if (lastAssistant && lastAssistant.id !== "sys-1") {
+      const pages = extractPages(lastAssistant.content);
+      if (pages.length > 0) setCurrentPage(pages[0]);
+    }
+  }, [messages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+  }, [messages, status]);
+
+  const jumpToPage = useCallback((page: number) => setCurrentPage(page), []);
+
+  const handleSend = () => {
+    const text = input.trim();
+    if (!text || status === "streaming" || status === "submitted") return;
+    sendMessage({ role: "user", content: text });
+    setInput("");
+  };
+
+  const isLoading = status === "streaming" || status === "submitted";
+  const pdfSrc = `${documentUrl}#page=${currentPage}&toolbar=0&navpanes=0`;
 
   return (
-    <div className="flex h-screen w-full bg-[#fdfdfc] dark:bg-[#0a0a0a] text-foreground">
-      {/* LEFT PANEL: PDF Viewer */}
-      <div className="flex-1 border-r border-border/50 hidden md:flex flex-col relative bg-muted/10">
-        <div className="h-14 border-b border-border/50 flex items-center px-4 bg-background/95 backdrop-blur z-10 sticky top-0 justify-between">
+    <div className="flex h-screen w-full bg-[oklch(0.10_0_0)] text-white overflow-hidden dark">
+
+      {/* ── LEFT: PDF Viewer ── */}
+      <div className="flex-1 border-r border-white/[0.06] hidden md:flex flex-col relative bg-[oklch(0.12_0.003_240)]">
+
+        {/* Toolbar */}
+        <div className="h-12 border-b border-white/[0.06] flex items-center px-4 bg-[oklch(0.12_0.003_240/0.95)] backdrop-blur z-10 sticky top-0 justify-between shrink-0">
           <div className="flex items-center gap-3">
-            <Button variant="ghost" size="icon" onClick={() => router.push('/')} className="h-8 w-8 text-muted-foreground mr-1">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-            <div className="p-1.5 bg-primary/10 rounded-md">
-              <FileText className="h-4 w-4 text-primary" />
+            <button
+              onClick={() => router.push("/")}
+              className="flex items-center justify-center w-7 h-7 rounded-lg text-white/40 hover:text-white transition-colors"
+              style={{ background: "oklch(1 0 0 / 0.05)", border: "1px solid oklch(1 0 0 / 0.08)" }}
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+            </button>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center justify-center w-6 h-6 rounded-md"
+                style={{ background: "oklch(0.55 0.18 160 / 0.15)", border: "1px solid oklch(0.65 0.18 160 / 0.25)" }}>
+                <FileText className="h-3 w-3 text-[oklch(0.72_0.18_160)]" />
+              </div>
+              <span className="font-medium text-xs text-white/70 truncate max-w-[260px]">{documentName}</span>
             </div>
-            <span className="font-medium text-sm truncate max-w-[300px]">{documentName}</span>
           </div>
+          <span className="text-[11px] text-white/30 font-mono">p.{currentPage}</span>
         </div>
-        <div className="flex-1 w-full relative">
-          <iframe 
-            src={`${documentUrl}#toolbar=0&navpanes=0`} 
-            className="w-full h-full border-0 absolute inset-0" 
+
+        {/* PDF iframe — key forces reload on page change */}
+        <div className="flex-1 relative">
+          <iframe
+            key={pdfSrc}
+            src={pdfSrc}
+            className="w-full h-full border-0 absolute inset-0 bg-[oklch(0.14_0_0)]"
             title={documentName}
           />
         </div>
       </div>
 
-      {/* RIGHT PANEL: Chat Interface (Claude-Style Minimalist) */}
-      <div className="w-full md:w-[600px] lg:w-[700px] flex flex-col bg-background h-screen relative shadow-2xl md:shadow-none">
-        {/* Chat Header */}
-        <div className="h-14 border-b border-border/50 flex items-center px-6 bg-background/95 backdrop-blur z-10 shrink-0">
-          <span className="font-medium text-sm text-muted-foreground">Chat Assistant</span>
+      {/* ── RIGHT: Chat Interface ── */}
+      <div className="w-full md:w-[580px] lg:w-[640px] flex flex-col h-screen"
+        style={{ background: "oklch(0.11 0.003 240)" }}>
+
+        {/* Chat header */}
+        <div className="h-12 border-b border-white/[0.06] flex items-center px-5 shrink-0"
+          style={{ background: "oklch(0.12 0.003 240 / 0.95)", backdropFilter: "blur(12px)" }}>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center justify-center w-6 h-6 rounded-md"
+              style={{ background: "oklch(0.55 0.18 160 / 0.15)", border: "1px solid oklch(0.65 0.18 160 / 0.25)" }}>
+              <Bot className="w-3 h-3 text-[oklch(0.72_0.18_160)]" />
+            </div>
+            <span className="text-sm font-medium text-white/70">Document Assistant</span>
+          </div>
         </div>
 
-        {/* Chat Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-6 scroll-smooth">
-          <div className="max-w-3xl mx-auto space-y-8 pb-10">
-            {messages.map((m: any) => (
-              <div key={m.id} className="group relative flex gap-4 w-full">
-                {/* Avatar */}
-                <div className="shrink-0 mt-0.5">
-                  {m.role === "user" ? (
-                    <div className="w-8 h-8 rounded-md bg-secondary flex items-center justify-center border border-border/50 shadow-sm">
-                      <User className="w-4 h-4 text-secondary-foreground" />
-                    </div>
-                  ) : (
-                    <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center border border-primary/20 shadow-sm">
-                      <Bot className="w-4 h-4 text-primary" />
-                    </div>
-                  )}
-                </div>
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto px-5 py-6 scroll-smooth">
+          <div className="max-w-2xl mx-auto space-y-7 pb-4">
+            {messages.map((m) => {
+              const pages = m.role === "assistant" ? extractPages(m.content) : [];
+              return (
+                <div key={m.id} className="flex gap-3 w-full">
+                  {/* Avatar */}
+                  <div className="shrink-0 mt-0.5">
+                    {m.role === "user" ? (
+                      <div className="w-7 h-7 rounded-lg flex items-center justify-center"
+                        style={{ background: "oklch(1 0 0 / 0.07)", border: "1px solid oklch(1 0 0 / 0.10)" }}>
+                        <User className="w-3.5 h-3.5 text-white/50" />
+                      </div>
+                    ) : (
+                      <div className="w-7 h-7 rounded-lg flex items-center justify-center"
+                        style={{ background: "oklch(0.55 0.18 160 / 0.15)", border: "1px solid oklch(0.65 0.18 160 / 0.25)" }}>
+                        <Bot className="w-3.5 h-3.5 text-[oklch(0.72_0.18_160)]" />
+                      </div>
+                    )}
+                  </div>
 
-                {/* Message Content */}
-                <div className="flex-1 min-w-0 space-y-1 overflow-hidden">
-                  <div className="font-medium text-xs text-muted-foreground mb-1">
-                    {m.role === "user" ? "You" : "Document Assistant"}
-                  </div>
-                  <div className={`prose prose-sm md:prose-base dark:prose-invert max-w-none leading-relaxed prose-p:leading-relaxed prose-pre:bg-muted prose-pre:border prose-pre:border-border/50
-                     ${m.role === 'user' ? 'text-foreground' : 'text-foreground/90'}`}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {m.content}
-                    </ReactMarkdown>
+                  {/* Bubble */}
+                  <div className="flex-1 min-w-0 space-y-2">
+                    <p className="text-[11px] font-medium text-white/30">
+                      {m.role === "user" ? "You" : "Assistant"}
+                    </p>
+                    <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed
+                      prose-p:text-white/75 prose-p:leading-relaxed prose-strong:text-white/90
+                      prose-code:text-[oklch(0.72_0.18_160)] prose-code:bg-white/[0.06] prose-code:px-1 prose-code:rounded
+                      prose-pre:bg-white/[0.04] prose-pre:border prose-pre:border-white/[0.08]">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content ?? ""}</ReactMarkdown>
+                    </div>
+
+                    {/* Page citation chips */}
+                    {pages.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {pages.map((page) => (
+                          <button
+                            key={page}
+                            onClick={() => jumpToPage(page)}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium transition-all"
+                            style={{
+                              background: currentPage === page
+                                ? "oklch(0.55 0.18 160 / 0.25)"
+                                : "oklch(0.55 0.18 160 / 0.10)",
+                              border: currentPage === page
+                                ? "1px solid oklch(0.65 0.18 160 / 0.50)"
+                                : "1px solid oklch(0.65 0.18 160 / 0.20)",
+                              color: "oklch(0.72 0.18 160)",
+                              boxShadow: currentPage === page ? "0 0 8px oklch(0.65 0.18 160 / 0.20)" : "none",
+                            }}
+                          >
+                            <BookOpen className="w-2.5 h-2.5" />
+                            Page {page}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
-              </div>
-            ))}
-            
-            {isLoading && messages[messages.length - 1]?.role === "user" && (
-              <div className="group relative flex gap-4 w-full animate-in fade-in duration-500">
-                <div className="shrink-0 mt-0.5">
-                  <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center border border-primary/20 shadow-sm">
-                     <Bot className="w-4 h-4 text-primary" />
-                  </div>
+              );
+            })}
+
+            {/* Loading indicator */}
+            {isLoading && (
+              <div className="flex gap-3 w-full animate-in fade-in duration-300">
+                <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
+                  style={{ background: "oklch(0.55 0.18 160 / 0.15)", border: "1px solid oklch(0.65 0.18 160 / 0.25)" }}>
+                  <Bot className="w-3.5 h-3.5 text-[oklch(0.72_0.18_160)]" />
                 </div>
-                <div className="flex-1 min-w-0 flex items-center">
-                   <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                   <span className="ml-2 text-sm text-muted-foreground">Searching document memory...</span>
+                <div className="flex items-center gap-2 mt-1">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[oklch(0.65_0.18_160)]" />
+                  <span className="text-xs text-white/35">Searching document memory...</span>
                 </div>
               </div>
             )}
-            <div ref={messagesEndRef} className="h-4" />
+            <div ref={messagesEndRef} />
           </div>
         </div>
 
-        {/* Input Area */}
-        <div className="p-4 bg-background border-t border-border/50">
-          <div className="max-w-3xl mx-auto">
-            <form 
-              onSubmit={handleSubmit} 
-              className="relative flex items-end w-full overflow-hidden rounded-xl border border-border/60 bg-muted/30 focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/40 transition-shadow duration-200"
-            >
-              <textarea
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    if(input.trim()) handleSubmit(e as any);
-                  }
+        {/* Input */}
+        <div className="p-4 border-t border-white/[0.06]" style={{ background: "oklch(0.12 0.003 240)" }}>
+          <div
+            className="relative flex items-end w-full overflow-hidden rounded-xl transition-all duration-200"
+            style={{ background: "oklch(0.16 0.005 240 / 0.80)", border: "1px solid oklch(1 0 0 / 0.10)" }}
+          >
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder="Ask a question about this document..."
+              className="flex-1 min-h-[52px] max-h-[180px] w-full resize-none border-0 bg-transparent py-3.5 pl-4 pr-12 text-sm text-white/80 placeholder-white/25 outline-none"
+              style={{ height: "52px" }}
+            />
+            <div className="absolute right-2.5 bottom-2.5">
+              <Button
+                type="button"
+                size="icon"
+                onClick={handleSend}
+                disabled={!input.trim() || isLoading}
+                className="h-7 w-7 rounded-lg text-white disabled:opacity-30 transition-all"
+                style={{
+                  background: "oklch(0.55 0.18 160 / 0.80)",
+                  border: "1px solid oklch(0.65 0.18 160 / 0.40)",
                 }}
-                placeholder="Ask a question about this document..."
-                className="flex-1 min-h-[60px] max-h-[200px] w-full resize-none border-0 bg-transparent py-4 pl-4 pr-12 text-sm focus:ring-0 text-foreground placeholder-muted-foreground outline-none"
-                style={{ height: "60px" }}
-              />
-              <div className="absolute right-2 bottom-3">
-                 <Button 
-                   type="submit" 
-                   size="icon" 
-                   disabled={!input.trim() || isLoading}
-                   className="h-8 w-8 rounded-lg shadow-sm transition-all bg-primary hover:bg-primary/90 text-primary-foreground disabled:opacity-50"
-                 >
-                    <Send className="h-4 w-4" />
-                 </Button>
-              </div>
-            </form>
-            <div className="text-center mt-2 pb-1">
-              <span className="text-[11px] text-muted-foreground/70 tracking-wide font-medium">
-                AI can make mistakes. Check the provided page sources.
-              </span>
+              >
+                <Send className="h-3.5 w-3.5" />
+              </Button>
             </div>
           </div>
+          <p className="text-center mt-2 text-[10px] text-white/20">
+            AI can make mistakes. Click page citations to verify sources.
+          </p>
         </div>
       </div>
     </div>

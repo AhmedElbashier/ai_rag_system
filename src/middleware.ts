@@ -37,19 +37,16 @@ export async function middleware(request: NextRequest) {
   } = await supabase.auth.getUser()
 
   const isApiRoute = request.nextUrl.pathname.startsWith('/api')
-  const isAuthRoute = request.nextUrl.pathname.startsWith('/auth')
-  const isPublicRoute = request.nextUrl.pathname === '/' || request.nextUrl.pathname.startsWith('/pricing') || request.nextUrl.pathname.startsWith('/api/stripe/webhook')
+  const isStripeWebhook = request.nextUrl.pathname === '/api/stripe/webhook'
 
-  // If the user isn't logged in and they are trying to access a protected route
-  if (!user && !isPublicRoute && !isAuthRoute) {
-    if (isApiRoute) {
-       return new NextResponse("Unauthorized. Please log in.", { status: 401 });
-    }
-    // Redirect to login page or just home page where they can initiate login if we don't have separate auth page yet
-    const redirectUrl = request.nextUrl.clone()
-    redirectUrl.pathname = '/'
-    // Can optionally append "?redirected=true"
-    return NextResponse.redirect(redirectUrl)
+  // All app pages are public until an auth flow is added.
+  // Only the monetization upload-limit check runs for authenticated users below.
+  const isPublicApiRoute = isStripeWebhook
+    || request.nextUrl.pathname.startsWith('/api-reference')
+    || request.nextUrl.pathname.startsWith('/api/chat');
+
+  if (!user && isApiRoute && !isPublicApiRoute) {
+    return new NextResponse("Unauthorized. Please log in.", { status: 401 });
   }
 
   // == Business Logic for Monetization ==
