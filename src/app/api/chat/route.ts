@@ -1,6 +1,9 @@
-import { google } from '@ai-sdk/google';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { embed, streamText } from 'ai';
 import { supabaseAdmin } from '@/lib/supabase';
+
+// Explicitly pass GEMINI_API_KEY because @ai-sdk/google defaults to GOOGLE_GENERATIVE_AI_API_KEY
+const google = createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 export async function POST(req: Request) {
   try {
@@ -13,17 +16,17 @@ export async function POST(req: Request) {
     const lastMessage = messages[messages.length - 1];
     const query = lastMessage.content;
 
-    // 1. Generate an embedding for the user's query using AI SDK
+    // 1. Embed the user query — must use same model as indexing (text-embedding-004 → 768 dims)
     const { embedding } = await embed({
       model: google.textEmbeddingModel('text-embedding-004'),
       value: query,
     });
 
-    // 2. Perform Similarity Search in Supabase using the query embedding
+    // 2. Similarity search scoped to this document
     const { data: matchedChunks, error: matchError } = await supabaseAdmin
       .rpc('match_embeddings', {
-        query_embedding: embedding,
-        match_count: 5 // get top 5 context chunks
+        query_embedding: `[${embedding.join(",")}]`, // pgvector string literal
+        match_count: 8,
       });
 
     if (matchError) {
@@ -31,35 +34,35 @@ export async function POST(req: Request) {
       return new Response("Error querying the document.", { status: 500 });
     }
 
-    // Filter chunks specifically for this document
+    // Filter to the specific document being chatted with
     const documentChunks = (matchedChunks || []).filter(
       (chunk: any) => chunk.document_id === documentId
     );
 
-    // 3. Build the prompt context based on retrieved blocks
-    const sources = documentChunks.map((chunk: any) => {
-      const pageNum = chunk.metadata?.loc?.pageNumber || "?";
-      return `[Page ${pageNum}]: ${chunk.content}`;
-    });
+    // 3. Build context string with page citations
+    const contextText = documentChunks
+      .map((chunk: any) => {
+        const pageNum = chunk.metadata?.loc?.pageNumber || "?";
+        return `[Page ${pageNum}]: ${chunk.content}`;
+      })
+      .join("\n\n");
 
-    const contextText = sources.join("\n\n");
-
-    const systemPrompt = `You are a highly intelligent semantic document assistant. 
-You are strictly assisting a user with questions regarding their provided PDF file.
-Here is the retrieved context from the PDF document:
+    const systemPrompt = `You are a highly intelligent semantic document assistant.
+You are strictly answering questions about the user's uploaded PDF document.
+Here is the retrieved context:
 
 <context>
-${contextText}
+${contextText || "No relevant context found for this query."}
 </context>
 
-Always answer the user's question accurately using ONLY the information in the provided context above. 
-Crucially: IMPORTANT: You must cite the page numbers in your response when referencing facts! 
-For example, "According to the document (Page 4), the main cause is..." 
-If the answer is not in the context, graciously tell the user that the document doesn't contain that information.`;
+Rules:
+- Answer ONLY using the context above.
+- Always cite page numbers: e.g. "According to the document (Page 4)..."
+- If the answer is not in the context, say so clearly.`;
 
-    // 4. Stream response back to the client using streamText
+    // 4. Stream the response — gemini-2.0-flash is fast and production-ready
     const response = await streamText({
-      model: google('gemini-2.5-flash-8b'), // Adjusted for accurate vercel AI SDK model naming
+      model: google('gemini-2.0-flash'),
       system: systemPrompt,
       messages: messages,
     });

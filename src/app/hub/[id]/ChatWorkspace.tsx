@@ -1,12 +1,14 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
 import { Send, Bot, User, FileText, ArrowLeft, Loader2, BookOpen } from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import type { UIMessage } from "ai";
 
 interface ChatWorkspaceProps {
   documentId: string;
@@ -14,21 +16,21 @@ interface ChatWorkspaceProps {
   documentName: string;
 }
 
-/** Extract all "Page N" / "(Page N)" citations from an AI message */
-function extractPages(text: string | undefined): number[] {
-  if (!text) return [];
+/** Extract plain text from a UIMessage (ai@6 uses parts[], not a content string) */
+function getMessageText(message: UIMessage): string {
+  return message.parts
+    .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
+    .map((p) => (p as { type: "text"; text: string }).text)
+    .join("");
+}
+
+/** Extract all "Page N" citations from an AI reply */
+function extractPages(text: string): number[] {
   const matches = [...text.matchAll(/\bpage\s+(\d+)\b/gi)];
   return [...new Set(matches.map((m) => parseInt(m[1], 10)))].filter(
     (n) => !isNaN(n) && n > 0
   );
 }
-
-const INITIAL_MESSAGE = {
-  id: "sys-1",
-  role: "assistant" as const,
-  content: "",  // filled per-document in the component
-  parts: [] as any[],
-};
 
 export default function ChatWorkspace({ documentId, documentUrl, documentName }: ChatWorkspaceProps) {
   const router = useRouter();
@@ -36,27 +38,33 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
   const [currentPage, setCurrentPage] = useState(1);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // ai@6 / @ai-sdk/react v3: configure via transport instead of api/body props
   const { messages, sendMessage, status, setMessages } = useChat({
-    api: "/api/chat",
-    body: { documentId },
+    transport: new DefaultChatTransport({
+      api: "/api/chat",
+      body: { documentId }, // sent with every request
+    }),
   });
 
-  // Set the welcome message once on mount
+  // Set welcome message on mount — UIMessage uses parts[], not content
   useEffect(() => {
     setMessages([{
       id: "sys-1",
       role: "assistant",
-      content: `Hi there! I've analyzed **${documentName}**. Ask me anything — I'll cite page numbers so you can verify.`,
-      parts: [],
+      parts: [{
+        type: "text" as const,
+        text: `Hi there! I've analyzed **${documentName}**. Ask me anything — I'll cite page numbers so you can verify.`,
+      }],
+      metadata: undefined,
     }]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documentId]);
 
-  // Auto-jump to the first page cited in the latest assistant message
+  // Auto-jump PDF to the first page cited in the latest assistant reply
   useEffect(() => {
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
     if (lastAssistant && lastAssistant.id !== "sys-1") {
-      const pages = extractPages(lastAssistant.content);
+      const pages = extractPages(getMessageText(lastAssistant));
       if (pages.length > 0) setCurrentPage(pages[0]);
     }
   }, [messages]);
@@ -70,7 +78,7 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
   const handleSend = () => {
     const text = input.trim();
     if (!text || status === "streaming" || status === "submitted") return;
-    sendMessage({ role: "user", content: text });
+    sendMessage({ text }); // ai@6 shorthand: { text } instead of { role, content }
     setInput("");
   };
 
@@ -82,7 +90,6 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
 
       {/* ── LEFT: PDF Viewer ── */}
       <div className="flex-1 border-r border-white/[0.06] hidden md:flex flex-col relative bg-[oklch(0.12_0.003_240)]">
-
         {/* Toolbar */}
         <div className="h-12 border-b border-white/[0.06] flex items-center px-4 bg-[oklch(0.12_0.003_240/0.95)] backdrop-blur z-10 sticky top-0 justify-between shrink-0">
           <div className="flex items-center gap-3">
@@ -104,7 +111,7 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
           <span className="text-[11px] text-white/30 font-mono">p.{currentPage}</span>
         </div>
 
-        {/* PDF iframe — key forces reload on page change */}
+        {/* PDF iframe — key forces reload when page changes */}
         <div className="flex-1 relative">
           <iframe
             key={pdfSrc}
@@ -115,11 +122,11 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
         </div>
       </div>
 
-      {/* ── RIGHT: Chat Interface ── */}
+      {/* ── RIGHT: Chat ── */}
       <div className="w-full md:w-[580px] lg:w-[640px] flex flex-col h-screen"
         style={{ background: "oklch(0.11 0.003 240)" }}>
 
-        {/* Chat header */}
+        {/* Header */}
         <div className="h-12 border-b border-white/[0.06] flex items-center px-5 shrink-0"
           style={{ background: "oklch(0.12 0.003 240 / 0.95)", backdropFilter: "blur(12px)" }}>
           <div className="flex items-center gap-2">
@@ -135,10 +142,10 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
         <div className="flex-1 overflow-y-auto px-5 py-6 scroll-smooth">
           <div className="max-w-2xl mx-auto space-y-7 pb-4">
             {messages.map((m) => {
-              const pages = m.role === "assistant" ? extractPages(m.content) : [];
+              const text = getMessageText(m);
+              const pages = m.role === "assistant" ? extractPages(text) : [];
               return (
                 <div key={m.id} className="flex gap-3 w-full">
-                  {/* Avatar */}
                   <div className="shrink-0 mt-0.5">
                     {m.role === "user" ? (
                       <div className="w-7 h-7 rounded-lg flex items-center justify-center"
@@ -153,7 +160,6 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
                     )}
                   </div>
 
-                  {/* Bubble */}
                   <div className="flex-1 min-w-0 space-y-2">
                     <p className="text-[11px] font-medium text-white/30">
                       {m.role === "user" ? "You" : "Assistant"}
@@ -162,10 +168,9 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
                       prose-p:text-white/75 prose-p:leading-relaxed prose-strong:text-white/90
                       prose-code:text-[oklch(0.72_0.18_160)] prose-code:bg-white/[0.06] prose-code:px-1 prose-code:rounded
                       prose-pre:bg-white/[0.04] prose-pre:border prose-pre:border-white/[0.08]">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content ?? ""}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
                     </div>
 
-                    {/* Page citation chips */}
                     {pages.length > 0 && (
                       <div className="flex flex-wrap gap-1.5 pt-1">
                         {pages.map((page) => (
@@ -174,12 +179,8 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
                             onClick={() => jumpToPage(page)}
                             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium transition-all"
                             style={{
-                              background: currentPage === page
-                                ? "oklch(0.55 0.18 160 / 0.25)"
-                                : "oklch(0.55 0.18 160 / 0.10)",
-                              border: currentPage === page
-                                ? "1px solid oklch(0.65 0.18 160 / 0.50)"
-                                : "1px solid oklch(0.65 0.18 160 / 0.20)",
+                              background: currentPage === page ? "oklch(0.55 0.18 160 / 0.25)" : "oklch(0.55 0.18 160 / 0.10)",
+                              border: currentPage === page ? "1px solid oklch(0.65 0.18 160 / 0.50)" : "1px solid oklch(0.65 0.18 160 / 0.20)",
                               color: "oklch(0.72 0.18 160)",
                               boxShadow: currentPage === page ? "0 0 8px oklch(0.65 0.18 160 / 0.20)" : "none",
                             }}
@@ -195,7 +196,6 @@ export default function ChatWorkspace({ documentId, documentUrl, documentName }:
               );
             })}
 
-            {/* Loading indicator */}
             {isLoading && (
               <div className="flex gap-3 w-full animate-in fade-in duration-300">
                 <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
